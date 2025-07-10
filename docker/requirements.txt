@@ -1,0 +1,8 @@
+earthengine-api
+geemap
+geopandas
+rasterio
+shapely
+numpy
+ephem
+pytest

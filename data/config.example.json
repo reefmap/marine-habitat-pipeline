@@ -1,0 +1,8 @@
+{
+  "aoi_path": "data/example_aoi.geojson",
+  "buffer_aoi": true,
+  "buffer_km": 2,
+  "start_date": "2021-01-01",
+  "end_date": "2021-12-31",
+  "cloud_thresh": 20
+}

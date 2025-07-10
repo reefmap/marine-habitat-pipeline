@@ -1,0 +1,5 @@
+{
+  "aoi_path": "data/example_aoi.geojson",
+  "buffer_aoi": true,
+  "buffer_km": 2
+}
