@@ -3,106 +3,135 @@ import json
 import os
 from pathlib import Path
 
-def initialize_ee(config_path: str = None, service_account: str = None, key_path: str = None):
-    """
-    Initialize Google Earth Engine client.
 
-    Supports two auth modes:
-      1. Service Account: via config file or overrides.
-      2. User Credentials: auto-detect CLI credentials in standard or project-local paths.
+def initialize_ee(config_path: str = None,
+                  service_account: str = None,
+                  key_path: str = None,
+                  project: str = None,
+                  interactive: bool = False):
+    """
+    Initialize Google Earth Engine client with guidance on errors.
+
+    Supports:
+      1. Service Account auth via config or overrides.
+      2. Personal CLI credentials stored in standard paths.
+
+    If `interactive` is True, prompts for missing credentials or project ID.
 
     Args:
-        config_path: Path to JSON config with 'service_account' and 'key_path'.
-        service_account: Service account email override.
-        key_path: Service account key JSON override.
+        config_path: Path to JSON config with 'service_account', 'key_path', and optional 'project'.
+        service_account: Service account email.
+        key_path: Path to service account key JSON.
+        project: GCP project ID for Earth Engine (can set env var EARTHENGINE_PROJECT/GEE_PROJECT).
+        interactive: Prompt interactively if credentials/project missing.
 
     Raises:
-        FileNotFoundError: If required files are missing.
-        ValueError: If provided inputs are incomplete.
-        RuntimeError: If auth/init fails.
-
-    Returns:
-        None. Earth Engine client initialized.
+        FileNotFoundError: If required credentials files are missing.
+        ValueError: If config inputs are incomplete.
     """
-    # 1) If no service-account inputs, try user credentials
-    if not any([config_path, service_account, key_path]):
-        # Collect possible credential paths
-        default_paths = []
-        # Env var override first
-        if os.environ.get('EARTHENGINE_CREDENTIALS'):
-            default_paths.append(Path(os.environ['EARTHENGINE_CREDENTIALS']))
-        # Project-local credentials
-        default_paths.append(Path.cwd() / '.config' / 'earthengine' / 'credentials')
-        # XDG on Unix/Mac
-        default_paths.append(Path.home() / '.config' / 'earthengine' / 'credentials')
-        # APPDATA on Windows
-        if os.name == 'nt':
-            default_paths.append(Path(os.environ.get('APPDATA', '')) / 'earthengine' / 'credentials')
+    try:
+        # Determine project from args or environment
+        project = project or os.environ.get('EARTHENGINE_PROJECT') or os.environ.get('GEE_PROJECT')
 
-        # Try each path for existing credentials
-        for cred in default_paths:
-            if cred and cred.exists():
-                try:
+        def try_initialize(creds=None, use_project=True):
+            try:
+                if creds:
+                    ee.Initialize(project=project, credentials=creds)
+                elif use_project and project:
+                    ee.Initialize(project=project)
+                else:
                     ee.Initialize()
-                    print(f"Earth Engine initialized using credentials from {cred}")
+                return True
+            except ee.EEException as e:
+                msg = str(e)
+                if 'Not signed up' in msg or 'project is not registered' in msg:
+                    raise RuntimeError(
+                        "Earth Engine project/account not registered. "
+                        "Visit https://developers.google.com/earth-engine/guides/access to register."
+                    )
+                return False
+
+        # 1) Service-account flow
+        if config_path or service_account or key_path:
+            if config_path:
+                cfg = json.loads(Path(config_path).read_text())
+                service_account = service_account or cfg.get('service_account')
+                key_path = key_path or cfg.get('key_path')
+                project = project or cfg.get('project')
+            if not service_account or not key_path:
+                raise ValueError("Service account and key_path must be provided for service-account auth.")
+            key_file = Path(key_path)
+            if not key_file.exists():
+                raise FileNotFoundError(f"Service account key not found: {key_path}")
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = str(key_file)
+            creds = ee.ServiceAccountCredentials(service_account, str(key_file))
+            if try_initialize(creds=creds):
+                print(f"Authenticated with service account {service_account} (project: {project or 'default'})")
+                return
+            if interactive:
+                print("Service-account auth failed. Please verify your service account, project ID, and permissions.")
+            raise RuntimeError("Earth Engine service-account initialization failed.")
+
+        # 2) Personal CLI credentials flow
+        cred_paths = []
+        if os.environ.get('EARTHENGINE_CREDENTIALS'):
+            cred_paths.append(Path(os.environ['EARTHENGINE_CREDENTIALS']))
+        cred_paths.append(Path.cwd() / '.config' / 'earthengine' / 'credentials')
+        cred_paths.append(Path.home() / '.config' / 'earthengine' / 'credentials')
+        if os.name == 'nt':
+            cred_paths.append(Path(os.environ.get('APPDATA', '')) / 'earthengine' / 'credentials')
+
+        for cred in cred_paths:
+            if cred.exists():
+                if try_initialize(creds=None):
+                    print(f"Initialized with CLI credentials from {cred} (project: {project or 'default'})")
                     return
-                except Exception:
-                    # If init fails (e.g., not registered), capture but continue to next
-                    continue
-        # No valid user credentials found
-        raise RuntimeError(
-            "Earth Engine credentials not found or invalid.
-"
-            "Please mount your Earth Engine CLI credentials at one of the following locations inside the container:
-"
-            f"  - $EARTHENGINE_CREDENTIALS (env var)
-"
-            f"  - {Path.cwd() / '.config' / 'earthengine' / 'credentials'}
-"
-            f"  - {Path.home() / '.config' / 'earthengine' / 'credentials'}
-"
-            "Ensure your user or service account is registered for Earth Engine (see https://developers.google.com/earth-engine/guides/access)."
+                break
+
+        # Interactive fallback
+        if interactive:
+            print("No valid Earth Engine credentials found or project unauthorized.")
+            print("1. If you don't have an EE account, sign up at https://developers.google.com/earth-engine/guides/access")
+            cred_input = input("Enter path to credentials file (or leave blank to skip): ").strip()
+            if cred_input:
+                os.environ['EARTHENGINE_CREDENTIALS'] = cred_input
+                if try_initialize(creds=None):
+                    print(f"Initialized with provided credentials at {cred_input}")
+                    return
+            proj_input = input("Enter your registered Earth Engine GCP project ID: ").strip()
+            if proj_input:
+                project = proj_input
+                if try_initialize(creds=None):
+                    print(f"Initialized with project override {project}")
+                    return
+            raise RuntimeError("Could not initialize Earth Engine. Please check your credentials and project registration.")
+
+        # Non-interactive error guidance
+        raise FileNotFoundError(
+            "Earth Engine initialization failed.\n"
+            "- Ensure you have credentials in ~/.config/earthengine/credentials or set EARTHENGINE_CREDENTIALS.\n"
+            "- If using a service account, provide --config JSON with service_account/key_path/project.\n"
+            "- To sign up or register your project, visit: https://developers.google.com/earth-engine/guides/access"
         )
 
-# 2) Load service-account creds if provided via config file
-    if config_path:
-        cfg_file = Path(config_path)
-        if not cfg_file.exists():
-            raise FileNotFoundError(f"Config file not found: {config_path}")
-        with cfg_file.open('r') as f:
-            cfg = json.load(f)
-        service_account = cfg.get('service_account')
-        key_path = cfg.get('key_path')
-
-    # 3) Validate service-account inputs
-    if not service_account or not key_path:
-        raise ValueError("Service account and key path must be provided via config or args.")
-    key_file = Path(key_path)
-    if not key_file.exists():
-        raise FileNotFoundError(f"Service account key not found: {key_path}")
-
-    # 4) Set env var for Google creds
-    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = str(key_file)
-
-    # 5) Authenticate via service account
-    try:
-        credentials = ee.ServiceAccountCredentials(service_account, str(key_file))
-        ee.Initialize(service_account=service_account, credentials=credentials)
-        print(f"Earth Engine initialized for service account: {service_account}")
     except Exception as e:
-        raise RuntimeError(f"Service account auth/init failed: {e}")
+        print("Error initializing Earth Engine:", e)
+        raise
 
 
 if __name__ == '__main__':
     import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Initialize Google Earth Engine client."
-    )
-    parser.add_argument('-c', '--config', help="Path to JSON config with 'service_account' and 'key_path'.")
-    parser.add_argument('-s', '--service_account', help="Service account email override.")
-    parser.add_argument('-k', '--key_path', help="Service account key JSON override.")
+    parser = argparse.ArgumentParser(description="Initialize Earth Engine client.")
+    parser.add_argument('-c','--config', help="JSON config with service_account/key_path/project.")
+    parser.add_argument('-s','--service_account', help="Service account email.")
+    parser.add_argument('-k','--key_path', help="Path to service account key.")
+    parser.add_argument('-p','--project', help="GCP project ID for Earth Engine.")
+    parser.add_argument('-i','--interactive', action='store_true', help="Prompt for missing info.")
     args = parser.parse_args()
-    initialize_ee(config_path=args.config,
-                 service_account=args.service_account,
-                 key_path=args.key_path)
+    initialize_ee(
+        config_path=args.config,
+        service_account=args.service_account,
+        key_path=args.key_path,
+        project=args.project,
+        interactive=args.interactive
+    )
