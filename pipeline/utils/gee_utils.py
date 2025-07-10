@@ -39,7 +39,7 @@ def initialize_ee(config_path: str = None, service_account: str = None, key_path
         if os.name == 'nt':
             default_paths.append(Path(os.environ.get('APPDATA', '')) / 'earthengine' / 'credentials')
 
-        # Try each path
+        # Try each path for existing credentials
         for cred in default_paths:
             if cred and cred.exists():
                 try:
@@ -47,17 +47,24 @@ def initialize_ee(config_path: str = None, service_account: str = None, key_path
                     print(f"Earth Engine initialized using credentials from {cred}")
                     return
                 except Exception:
+                    # If init fails (e.g., not registered), capture but continue to next
                     continue
-        # No static creds, attempt interactive auth
-        try:
-            ee.Authenticate()
-            ee.Initialize()
-            print("Earth Engine authenticated and initialized interactively.")
-            return
-        except Exception as e:
-            raise RuntimeError(f"Earth Engine auth/init failed: {e}")
+        # No valid user credentials found
+        raise RuntimeError(
+            "Earth Engine credentials not found or invalid.
+"
+            "Please mount your Earth Engine CLI credentials at one of the following locations inside the container:
+"
+            f"  - $EARTHENGINE_CREDENTIALS (env var)
+"
+            f"  - {Path.cwd() / '.config' / 'earthengine' / 'credentials'}
+"
+            f"  - {Path.home() / '.config' / 'earthengine' / 'credentials'}
+"
+            "Ensure your user or service account is registered for Earth Engine (see https://developers.google.com/earth-engine/guides/access)."
+        )
 
-    # 2) Load service-account creds if provided via config file
+# 2) Load service-account creds if provided via config file
     if config_path:
         cfg_file = Path(config_path)
         if not cfg_file.exists():
