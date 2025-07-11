@@ -10,7 +10,7 @@ python -m pipeline.entrypoint clearwater \
        --start 2024-06-01 --end 2024-06-30 \
        --out s3://reefmap/mosaics/2024/ \
        --gee-service-account gee-sa.json \
-       --copernicus-user you@example.com --copernicus-pass **** \
+       --copernicus-creds copernicus_creds.json \
        --non-interactive
 """
 # ---------------------------------------------------------------------
@@ -25,7 +25,6 @@ import textwrap
 import pathlib
 import urllib.request
 import urllib.parse
-from datetime import datetime as _dt
 from typing import List, Dict
 
 import geopandas as gpd
@@ -45,11 +44,11 @@ DEF_CFG: Dict[str, float | int] = {
     "water_occurrence_thresh": 80,
     "max_scenes": 50,
     "gee_scale": 10,
-    # Cost-model knobs (used by resource estimator) -------------------
+    # Cost-model knobs --------------------------------
     "scene_size_gb": 0.55,
     "cpu_hours_per_tile": 0.12,
-    "storage_cost_gb": 0.023,  # $/GB-month
-    "compute_cost_hr": 0.048,  # $/vCPU-h
+    "storage_cost_gb": 0.023,
+    "compute_cost_hr": 0.048,
 }
 
 # ---------------------------------------------------------------------
@@ -59,22 +58,19 @@ DEF_CFG: Dict[str, float | int] = {
 def _load_aoi(aoi_str: str) -> gpd.GeoDataFrame:
     """Load AOI from path, URL or inline GeoJSON."""
     aoi_str = aoi_str.strip()
-    # inline GeoJSON
     if aoi_str.startswith("{"):
         return gpd.GeoDataFrame.from_features(json.loads(aoi_str))
-    # remote resource
     parsed = urllib.parse.urlparse(aoi_str)
     if parsed.scheme in ("http", "https", "ftp"):
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".geojson")
         tmp.write(urllib.request.urlopen(aoi_str).read())
         tmp.close()
         return gpd.read_file(tmp.name)
-    # local file
     return gpd.read_file(aoi_str)
 
 
 def _decide_mode(tile_stats: List[dict], cfg: dict, force: str | None) -> str:
-    """Return either *cloud* or *offline* based on estimator (or --force)."""
+    """Return either 'cloud' or 'offline' based on estimator or force flag."""
     if force:
         return force
     est = estimate.estimate_resources(
@@ -91,8 +87,8 @@ def _decide_mode(tile_stats: List[dict], cfg: dict, force: str | None) -> str:
 # ---------------------------------------------------------------------
 
 def clearwater(args: argparse.Namespace) -> None:
-    """Run Lane 1 (clear-water mosaic) from parsed CLI *args*."""
-    # ---------- 1. Earth-Engine login ----------
+    """Run Lane 1 clear-water mosaic."""
+    # ---------- 1. Earth Engine login ----------
     if args.gee_service_account:
         sa_key = pathlib.Path(args.gee_service_account)
         sa_email = json.loads(sa_key.read_text())["client_email"]
@@ -101,14 +97,21 @@ def clearwater(args: argparse.Namespace) -> None:
     else:
         ee.Initialize()  # uses ~/.config/earthengine
 
-    # Ensure tidal-range raster asset exists (lazy import inside fn).
+    # ---------- 2. Copernicus creds ----------
+    if args.copernicus_creds:
+        cdse = json.loads(pathlib.Path(args.copernicus_creds).read_text())
+        user, pwd = cdse.get("user"), cdse.get("pass")
+    else:
+        user, pwd = args.copernicus_user, args.copernicus_pass
+
+    # Ensure tidal-range raster asset exists
     ensure_tidal_asset()
 
-    # ---------- 2. AOI & tiling ----------
+    # ---------- 3. AOI & tiling ----------
     aoi = _load_aoi(args.aoi)
     tiles = tiler.split_aoi(aoi, km=1)
 
-    # ---------- 3. Build run-time config ----------
+    # ---------- 4. Build config ----------
     cfg_path = pathlib.Path(args.config or "config.json")
     cfg = DEF_CFG.copy()
     if cfg_path.exists():
@@ -125,17 +128,16 @@ def clearwater(args: argparse.Namespace) -> None:
     })
     cfg_path.write_text(json.dumps(cfg, indent=2))
 
-    # ---------- 4. Decide cloud / offline ----------
+    # ---------- 5. Decide cloud/offline ----------
     tile_stats = [{"n_scenes": cfg["max_scenes"]} for _ in tiles]
     mode = _decide_mode(tile_stats, cfg, args.force)
     print(f"▶ Running Lane-1 in **{mode.upper()}** mode")
 
-    # ---------- 5. Process tiles ----------
+    # ---------- 6. Process tiles ----------
     task_ids: List[str] = []
     for idx, tile in enumerate(tiles):
         geom = _shp.shape(tile["geometry"].__geo_interface__)
         tid = f"{tile['id']}_{idx:02}"
-
         if mode == "cloud":
             tid_out = cloud_runner.process_tile_cloud(geom, tid, cfg)
         else:
@@ -143,8 +145,8 @@ def clearwater(args: argparse.Namespace) -> None:
                 aoi_wkt=geom.wkt,
                 start=cfg["start_date"],
                 end=cfg["end_date"],
-                user=args.copernicus_user,
-                pwd=args.copernicus_pass,
+                user=user,
+                pwd=pwd,
                 outdir=pathlib.Path(args.out) / "scenes",
             )
             tid_out = offline_runner.process_tile_offline(geom, tid, cfg)
@@ -162,7 +164,7 @@ def _cli() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=textwrap.dedent(
             """Marine-Habitat Pipeline CLI
-            
+
             Examples
             --------
             mhp clearwater --aoi reef.geojson --start 2024-06-01 --end 2024-06-30 \
@@ -179,12 +181,14 @@ def _cli() -> argparse.Namespace:
     cw.add_argument("--out", required=True, help="Local dir OR s3://bucket/prefix")
     cw.add_argument("--config", help="Existing config.json to load / overwrite")
     cw.add_argument("--gee-service-account", help="Path to service-account JSON key")
-    cw.add_argument("--copernicus-user", help="SciHub username")
-    cw.add_argument("--copernicus-pass", help="SciHub password")
+    cw.add_argument("--copernicus-user", help="CDSE username (email)")
+    cw.add_argument("--copernicus-pass", help="CDSE password")
+    cw.add_argument("--copernicus-creds", help="Path to JSON with {user,pass}")
     cw.add_argument("--non-interactive", action="store_true")
     cw.add_argument("--force", choices=("cloud", "offline"), help="Override estimator")
 
     return p.parse_args()
+
 
 # ---------------------------------------------------------------------
 
@@ -196,5 +200,6 @@ def main() -> None:
         sys.exit("Unknown command")
 
 # ---------------------------------------------------------------------
+
 if __name__ == "__main__":
     main()
