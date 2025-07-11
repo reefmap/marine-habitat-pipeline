@@ -69,18 +69,12 @@ def _decide_mode(tile_stats: list[dict], cfg: dict, force: str | None):
 
 # ---------------------------------------------------------------------
 def clearwater(args: argparse.Namespace):
-    # ----------------  EE login  ----------------
+    # ----------------  EE login  via Application Default Credentials  ----------------
+    # Mount your service-account JSON to a file and pass its path via --gee-service-account
     if args.gee_service_account:
-        ee.Initialize(
-            ee.ServiceAccountCredentials(
-                email=args.gee_service_account,
-                key_file=args.gee_service_account,
-            )
-        )
-    else:
-        ee.Initialize()      # uses saved user creds
-
-    ensure_tidal_asset()     # ← upload/download once, then cache
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = args.gee_service_account
+    # This will use ADC (env var) or fall back to user‐authenticated ~/.config/earthengine
+    ee.Initialize()
 
     # ----------------  AOI & tiling  -------------
     aoi = _load_aoi(args.aoi)
